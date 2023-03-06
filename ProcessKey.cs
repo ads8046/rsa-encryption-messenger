@@ -1,0 +1,288 @@
+// Author: Atharva Shivankar <ads8046@rit.edu>
+// COPADS Project 3: Secure Messaging
+// Date: Nov 17 2022
+
+using System.Numerics;
+using System.Text;
+using Newtonsoft.Json;
+
+namespace Messenger;
+
+/// <summary>
+/// A key processor class to perform operations like keyGen, sendKey, sendMsg, getMsg
+/// on RSA keys.This class is primarily responsible for RSA key generation, encryption
+/// and decryption of messages and key sharing capabilities. 
+/// </summary>
+public class ProcessKey {
+    
+    private BigInteger _dGlobal;
+    
+    /// <summary>
+    /// A helper function to sequentially extract the key format into byte arrays.
+    /// </summary>
+    /// <param name="keyFileName">Name of the key file</param>
+    public BigInteger ProcessKeyFile(string? keyFileName) {
+        if (keyFileName == null) {
+            Console.WriteLine("key file not available to process in ProcessKeyFile");
+            return 0;
+        }
+        
+        var fileContent = File.ReadAllText(keyFileName);
+        var publicKey = JsonConvert.DeserializeObject<PublicKey>(fileContent);
+        
+        if (publicKey == null) return 0;
+
+        var b64Key = Convert.FromBase64String(publicKey.key);
+
+        var eBytes = b64Key.Take(4).Reverse().ToArray();
+
+        var e = BitConverter.ToInt32(eBytes, 0);
+        
+        var EBytes = b64Key.Skip(4).Take(e).ToArray();
+        
+        var E  = new BigInteger(EBytes);
+
+        var nBytes = b64Key.Skip(4 + e).Take(4).Reverse().ToArray();
+        var n = BitConverter.ToInt32(nBytes);
+
+        var NBytes = b64Key.Skip(4 + e + 4).Take(n).Reverse().ToArray();
+        var N = new BigInteger(NBytes);
+
+        return N;
+    }
+    
+    
+    /// <summary>
+    /// Generates a key pair (a public and a private key) using the user
+    /// specified key size.
+    /// </summary>
+    /// <param name="keySize">Key size in bits</param>
+    public void KeyGen(int keySize) {
+        var pSize = keySize / 2 + (int)Math.Ceiling(0.2 * keySize);
+        var qSize = keySize - pSize;
+
+        var pBytes = pSize / 8;
+        var pOddNum = RandomBitGen.GetRandomOdd(pBytes);
+        var pInitPrimeTest = PrimeTester.IsProbablyPrime(pOddNum);
+        
+        var qBytes = qSize / 8;
+        var qOddNum = RandomBitGen.GetRandomOdd(qBytes);
+        var qInitPrimeTest = PrimeTester.IsProbablyPrime(qOddNum);
+        
+        var p = Helper.GetPrime(pInitPrimeTest, qOddNum, pBytes);
+        var q = Helper.GetPrime(qInitPrimeTest, qOddNum, qBytes);
+        
+        var N = p * q;
+        var r = (p - 1) * (q - 1);
+        const int E = 65537;
+        var D = Helper.ModInverse(E, r);
+        _dGlobal = D;
+
+        var EBytes = BitConverter.GetBytes(E);
+
+        var e = EBytes.Length;
+        var eBytes = new byte[4];
+        eBytes = BitConverter.GetBytes(e);
+        eBytes = eBytes.Reverse().ToArray();
+
+        var Nbytes = N.ToByteArray();
+        Nbytes = Nbytes.Reverse().ToArray();
+
+        var n = Nbytes.Length;
+        var nBytes = new byte[4];
+        nBytes = BitConverter.GetBytes(n);
+
+        var pubKey = new byte[eBytes.Length + EBytes.Length + nBytes.Length + Nbytes.Length];
+        Buffer.BlockCopy(eBytes, 0, pubKey, 0, eBytes.Length);
+        Buffer.BlockCopy(EBytes, 0, pubKey, eBytes.Length, EBytes.Length);
+        Buffer.BlockCopy(nBytes, 0, pubKey, eBytes.Length + EBytes.Length, nBytes.Length);
+        Buffer.BlockCopy(Nbytes, 0, pubKey, eBytes.Length + EBytes.Length + nBytes.Length, Nbytes.Length);
+
+        var pubKeyB64 = Convert.ToBase64String(pubKey);
+
+        var publicKey = new PublicKey {
+            email = "",
+            key = pubKeyB64
+        };
+
+        const string pubKeyPath = "public.key";
+
+        var jsonPubKey = JsonConvert.SerializeObject(publicKey);
+        File.WriteAllText(pubKeyPath, jsonPubKey);
+        
+
+        var DBytes = D.ToByteArray();
+        DBytes = DBytes.Reverse().ToArray();
+        
+        var d = DBytes.Length;
+
+        var dBytes = new byte[4];
+        dBytes = BitConverter.GetBytes(d);
+        dBytes = dBytes.Reverse().ToArray();
+        
+        
+        var pvtKey = new byte[dBytes.Length + DBytes.Length + nBytes.Length + Nbytes.Length];
+        Buffer.BlockCopy(dBytes, 0, pvtKey, 0, dBytes.Length);
+        Buffer.BlockCopy(DBytes, 0, pvtKey, dBytes.Length, DBytes.Length);
+        Buffer.BlockCopy(nBytes, 0, pvtKey, dBytes.Length + DBytes.Length, nBytes.Length);
+        Buffer.BlockCopy(Nbytes, 0, pvtKey, dBytes.Length + dBytes.Length + nBytes.Length, Nbytes.Length);
+
+        var pvtKeyB64 = Convert.ToBase64String(pvtKey);
+
+        var privateKey = new PrivateKey();
+        privateKey.email = new[] { "" };
+        privateKey.key = pvtKeyB64;
+        
+        const string pvtKeyPath = "private.key";
+
+        var jsonPvtKey = JsonConvert.SerializeObject(privateKey);
+        File.WriteAllText(pvtKeyPath, jsonPvtKey);
+    }
+    
+    
+    /// <summary>
+    /// A function to send a public key generated by keyGen the server with the given email.
+    /// </summary>
+    /// <param name="email">Email to add to the public key</param>
+    public async void SendKey(string email) {
+        const string filePathPub = "public.key";
+        const string filePathPvt = "private.key";
+        if (File.Exists(filePathPub) && File.Exists(filePathPvt)) {
+
+            try {
+                var apiEndpoint = "http://kayrun.cs.rit.edu:5000/Key/" + email;
+
+                var pubKeyStr = File.ReadAllText(filePathPub);
+                var pvtKeyStr = File.ReadAllText(filePathPvt);
+
+                var publicKey = JsonConvert.DeserializeObject<PublicKey>(pubKeyStr);
+                var privateKey = JsonConvert.DeserializeObject<PrivateKey>(pvtKeyStr);
+                
+                if (publicKey != null && privateKey != null) {
+                    publicKey.email = email;
+                    List<string> list = new List<string>(privateKey.email);
+                    list.Add(email);
+                    privateKey.email = list.ToArray();
+                }
+                
+                var writePubStr = JsonConvert.SerializeObject(publicKey);
+                var writePvtStr = JsonConvert.SerializeObject(pvtKeyStr);
+                
+                File.WriteAllText(filePathPub, writePubStr);
+                File.WriteAllText(filePathPvt, writePvtStr);
+
+                var payload = new StringContent(writePubStr, Encoding.UTF8, "application/json");
+                var httpClient = new HttpClient();
+            
+                var response = await httpClient.PutAsync(apiEndpoint, payload);
+            
+                if (response.IsSuccessStatusCode) {
+                    Console.WriteLine("Key saved");
+                }
+            }
+            catch (HttpRequestException e) {
+                Console.WriteLine("Exception occured (sendKey) :{0} ", e.Message);
+            }
+        }
+        
+        else {
+            Console.WriteLine("Public key unavailable. Please generate a key pair first using <keyGen> option.");
+            Environment.Exit(6);
+        }
+    }
+    
+    
+    
+    /// <summary>
+    /// Encrypts a plaintext message with the public key of the recipient
+    /// and sends it to the server. If the key is unavailable an error
+    /// message is displayed. 
+    /// </summary>
+    /// <param name="email"></param>
+    /// <param name="plainTxt"></param>
+    public async void SendMsg(string email, string plainTxt) {
+        var filePath = email + ".key";
+        
+        if ( File.Exists(filePath) ) {
+            try {
+                var apiUrl = "http://kayrun.cs.rit.edu:5000/Message/" + email;
+                const int E = 65537;
+            
+                var msgByteArr = Encoding.ASCII.GetBytes(plainTxt);
+                var msgBigInt = new BigInteger(msgByteArr);
+
+                var N = ProcessKeyFile(filePath);
+
+                var cipherInt = BigInteger.ModPow(msgBigInt, E, N);
+                var cipherBytes = cipherInt.ToByteArray();
+                var cipherTxtB64 = Convert.ToBase64String(cipherBytes);
+
+                var message = new Message {
+                    email = email,
+                    content = cipherTxtB64
+                };
+
+                var jsonMessage = JsonConvert.SerializeObject(message);
+                var payload = new StringContent(jsonMessage, Encoding.UTF8, "application/json");
+                var httpClient = new HttpClient();
+                
+                var response = await httpClient.PutAsync(apiUrl, payload);
+
+                if (response.IsSuccessStatusCode) {
+                    Console.WriteLine("Message written");
+                }
+            }
+            catch (HttpRequestException e) {
+                Console.WriteLine("Exception occured (sendKey) :{0} ", e.Message);
+            }
+        } 
+        
+        else {
+            Console.WriteLine("Key does not exist for " + email);
+            Console.WriteLine("Please download the key locally.");
+            Environment.Exit(5);
+        }
+    }
+    
+
+    /// <summary>
+    /// Gets a message from a user from a server, checks if the system has a private
+    /// key. If it does, the getMsg function decrypts the cipher text and prints the
+    /// message to the console.
+    /// </summary>
+    /// <param name="email"></param>
+    public async void GetMsg(string email) {
+        var filePathPvtK =  "private.key";
+        var readF = File.ReadAllText(filePathPvtK);
+        var privateKey = JsonConvert.DeserializeObject<PrivateKey>(readF);
+        
+        var pvtKeyExists = Array.Exists( privateKey.email, element => element == email  );
+
+        if (pvtKeyExists) {
+            var reqUrl = "http://kayrun.cs.rit.edu:5000/Key/" + email;
+            HttpClient httpClient = new HttpClient();
+
+            var resp = await httpClient.GetAsync(reqUrl);
+
+            if (resp.IsSuccessStatusCode) {
+                var strResp = resp.Content.ReadAsStringAsync().Result;
+                var message = JsonConvert.DeserializeObject<Message>(strResp);
+
+                var content = Convert.FromBase64String(message.content);
+                var C = new BigInteger(content);
+                var N = ProcessKeyFile(email + ".key");
+                
+                var P = BigInteger.ModPow(C, _dGlobal, N);
+
+                var pBytes = P.ToByteArray();
+                string finalMessage = Encoding.UTF8.GetString(pBytes, 0, pBytes.Length);
+                
+                Console.WriteLine(finalMessage);
+            }
+        }
+        else {
+            Console.WriteLine("Private Key unavailable to decode the message for the user " + email);
+        }
+        
+    }
+}
